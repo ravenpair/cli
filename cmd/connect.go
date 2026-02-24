@@ -38,6 +38,8 @@ func runConnect(cmd *cobra.Command, args []string) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	fmt.Fprintln(cmd.OutOrStdout(), "Connected. Press Ctrl+C to disconnect.")
+
 	connDone := make(chan error, 1)
 	go func() {
 		connDone <- svc.Connect(ctx, serverURL, path, token, func(msgType int, data []byte) {
@@ -49,8 +51,6 @@ func runConnect(cmd *cobra.Command, args []string) error {
 			}
 		})
 	}()
-
-	fmt.Fprintln(cmd.OutOrStdout(), "Connected. Press Ctrl+C to disconnect.")
 
 	select {
 	case err := <-connDone:
