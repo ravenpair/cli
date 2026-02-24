@@ -6,15 +6,29 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"github.com/ravenpair/cli/internal/adapters/http"
+	"github.com/ravenpair/cli/internal/adapters/ws"
+	"github.com/ravenpair/cli/internal/app"
 )
 
 var cfgFile string
+
+// svc is the application service used by all sub-commands. It is wired with
+// concrete adapters in PersistentPreRunE and can be replaced in tests.
+var svc *app.Service
 
 var rootCmd = &cobra.Command{
 	Use:   "ravenpair",
 	Short: "CLI tool to interact with the RavenPair server",
 	Long: `ravenpair is a command-line interface for connecting to and managing
 a RavenPair server via its REST API and WebSocket interface.`,
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		serverURL := viper.GetString("server")
+		token := viper.GetString("token")
+		svc = app.New(http.New(serverURL, token), ws.New())
+		return nil
+	},
 }
 
 // Execute runs the root command.

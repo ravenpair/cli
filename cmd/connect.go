@@ -1,12 +1,10 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
-	"strings"
-	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/spf13/cobra"
@@ -30,83 +28,44 @@ func init() {
 func runConnect(cmd *cobra.Command, args []string) error {
 	path, _ := cmd.Flags().GetString("path")
 	serverURL := viper.GetString("server")
+	token := viper.GetString("token")
 
-	// Convert http(s) scheme to ws(s)
-	wsURL := toWebSocketURL(serverURL) + path
-	fmt.Fprintf(cmd.OutOrStdout(), "Connecting to %s\n", wsURL)
-
-	headers := http.Header{}
-	if token := viper.GetString("token"); token != "" {
-		headers.Set("Authorization", "Bearer "+token)
-	}
-
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
-	}
-
-	conn, _, err := dialer.Dial(wsURL, headers)
-	if err != nil {
-		return fmt.Errorf("WebSocket dial: %w", err)
-	}
-	defer conn.Close()
-
-	fmt.Fprintln(cmd.OutOrStdout(), "Connected. Press Ctrl+C to disconnect.")
+	fmt.Fprintf(cmd.OutOrStdout(), "Connecting to %s%s\n", serverURL, path)
 
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
+	defer signal.Stop(interrupt)
 
-	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
 
-	// Read messages from server
+	connDone := make(chan error, 1)
 	go func() {
-		defer close(done)
-		for {
-			msgType, msg, err := conn.ReadMessage()
-			if err != nil {
-				if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					fmt.Fprintf(cmd.ErrOrStderr(), "read error: %v\n", err)
-				}
-				return
-			}
+		connDone <- svc.Connect(ctx, serverURL, path, token, func(msgType int, data []byte) {
 			switch msgType {
 			case websocket.TextMessage:
-				fmt.Fprintf(cmd.OutOrStdout(), "< %s\n", msg)
+				fmt.Fprintf(cmd.OutOrStdout(), "< %s\n", data)
 			case websocket.BinaryMessage:
-				fmt.Fprintf(cmd.OutOrStdout(), "< [binary %d bytes]\n", len(msg))
+				fmt.Fprintf(cmd.OutOrStdout(), "< [binary %d bytes]\n", len(data))
 			}
-		}
+		})
 	}()
 
+	fmt.Fprintln(cmd.OutOrStdout(), "Connected. Press Ctrl+C to disconnect.")
+
 	select {
-	case <-done:
+	case err := <-connDone:
+		if err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "connection error: %v\n", err)
+			cancel()
+			return err
+		}
 		fmt.Fprintln(cmd.OutOrStdout(), "Connection closed by server.")
+		cancel()
 	case <-interrupt:
 		fmt.Fprintln(cmd.OutOrStdout(), "\nInterrupted. Closing connection...")
-		err = conn.WriteMessage(
-			websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
-		)
-		if err != nil {
-			return fmt.Errorf("sending close: %w", err)
-		}
-		select {
-		case <-done:
-		case <-time.After(3 * time.Second):
-		}
+		cancel()
+		<-connDone
 	}
 
 	return nil
-}
-
-// toWebSocketURL converts an http/https URL to a ws/wss URL.
-func toWebSocketURL(u string) string {
-	u = strings.TrimRight(u, "/")
-	switch {
-	case strings.HasPrefix(u, "https://"):
-		return "wss://" + strings.TrimPrefix(u, "https://")
-	case strings.HasPrefix(u, "http://"):
-		return "ws://" + strings.TrimPrefix(u, "http://")
-	default:
-		return u
-	}
 }

@@ -4,11 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
-	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var apiCmd = &cobra.Command{
@@ -47,40 +44,6 @@ func init() {
 	pairCmd.Flags().String("name", "", "name for the pair session")
 }
 
-func newHTTPClient() *http.Client {
-	return &http.Client{}
-}
-
-func doRequest(method, path string, body io.Reader) ([]byte, int, error) {
-	serverURL := strings.TrimRight(viper.GetString("server"), "/")
-	url := serverURL + path
-
-	req, err := http.NewRequest(method, url, body)
-	if err != nil {
-		return nil, 0, fmt.Errorf("creating request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	if token := viper.GetString("token"); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	resp, err := newHTTPClient().Do(req)
-	if err != nil {
-		return nil, 0, fmt.Errorf("sending request to %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("reading response: %w", err)
-	}
-
-	return data, resp.StatusCode, nil
-}
-
 func printJSON(w io.Writer, data []byte) {
 	var v interface{}
 	if err := json.Unmarshal(data, &v); err != nil {
@@ -96,42 +59,35 @@ func printJSON(w io.Writer, data []byte) {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
-	data, status, err := doRequest(http.MethodGet, "/api/status", nil)
+	statusCode, body, err := svc.API.GetStatus()
 	if err != nil {
 		return err
 	}
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "HTTP %d\n", status)
-	printJSON(out, data)
+	fmt.Fprintf(out, "HTTP %d\n", statusCode)
+	printJSON(out, body)
 	return nil
 }
 
 func runPair(cmd *cobra.Command, args []string) error {
 	name, _ := cmd.Flags().GetString("name")
-
-	var body io.Reader
-	if name != "" {
-		payload := fmt.Sprintf(`{"name":%q}`, name)
-		body = strings.NewReader(payload)
-	}
-
-	data, status, err := doRequest(http.MethodPost, "/api/pairs", body)
+	statusCode, body, err := svc.API.CreatePair(name)
 	if err != nil {
 		return err
 	}
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "HTTP %d\n", status)
-	printJSON(out, data)
+	fmt.Fprintf(out, "HTTP %d\n", statusCode)
+	printJSON(out, body)
 	return nil
 }
 
 func runList(cmd *cobra.Command, args []string) error {
-	data, status, err := doRequest(http.MethodGet, "/api/pairs", nil)
+	statusCode, body, err := svc.API.ListPairs()
 	if err != nil {
 		return err
 	}
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "HTTP %d\n", status)
-	printJSON(out, data)
+	fmt.Fprintf(out, "HTTP %d\n", statusCode)
+	printJSON(out, body)
 	return nil
 }

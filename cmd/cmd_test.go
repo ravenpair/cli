@@ -2,21 +2,40 @@ package cmd
 
 import (
 	"bytes"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"context"
 	"strings"
 	"testing"
 
-	"github.com/spf13/viper"
+	"github.com/ravenpair/cli/internal/app"
+	"github.com/ravenpair/cli/internal/ports"
 )
 
-// resetViper resets viper state between tests.
-func resetViper(serverURL string) {
-	viper.Reset()
-	viper.Set("server", serverURL)
-	viper.Set("token", "")
+// --- mock implementations of ports ---
+
+type mockAPIClient struct {
+	getStatusFn  func() (int, []byte, error)
+	listPairsFn  func() (int, []byte, error)
+	createPairFn func(string) (int, []byte, error)
 }
+
+func (m *mockAPIClient) GetStatus() (int, []byte, error)          { return m.getStatusFn() }
+func (m *mockAPIClient) ListPairs() (int, []byte, error)          { return m.listPairsFn() }
+func (m *mockAPIClient) CreatePair(name string) (int, []byte, error) { return m.createPairFn(name) }
+
+type mockWSClient struct {
+	dialFn func(ctx context.Context, wsURL string, headers map[string]string, onMessage ports.MessageHandler) error
+}
+
+func (m *mockWSClient) Dial(ctx context.Context, wsURL string, headers map[string]string, onMessage ports.MessageHandler) error {
+	return m.dialFn(ctx, wsURL, headers, onMessage)
+}
+
+// setSvc replaces the package-level service with one backed by the given mocks.
+func setSvc(api ports.APIClient, ws ports.WSClient) {
+	svc = app.New(api, ws)
+}
+
+// --- tests ---
 
 func TestVersionCmd(t *testing.T) {
 	Version = "1.2.3"
@@ -34,25 +53,17 @@ func TestVersionCmd(t *testing.T) {
 }
 
 func TestStatusCmd(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/status" || r.Method != http.MethodGet {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	}))
-	defer srv.Close()
-
-	resetViper(srv.URL)
+	setSvc(&mockAPIClient{
+		getStatusFn: func() (int, []byte, error) {
+			return 200, []byte(`{"status":"ok"}`), nil
+		},
+	}, nil)
 
 	buf := new(bytes.Buffer)
 	statusCmd.SetOut(buf)
 	statusCmd.SetErr(new(bytes.Buffer))
 
-	err := statusCmd.RunE(statusCmd, nil)
-	if err != nil {
+	if err := statusCmd.RunE(statusCmd, nil); err != nil {
 		t.Fatalf("status command failed: %v", err)
 	}
 
@@ -66,28 +77,17 @@ func TestStatusCmd(t *testing.T) {
 }
 
 func TestListCmd(t *testing.T) {
-	pairs := []map[string]string{{"id": "1", "name": "alpha"}, {"id": "2", "name": "beta"}}
-	body, _ := json.Marshal(pairs)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/pairs" || r.Method != http.MethodGet {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(body)
-	}))
-	defer srv.Close()
-
-	resetViper(srv.URL)
+	setSvc(&mockAPIClient{
+		listPairsFn: func() (int, []byte, error) {
+			return 200, []byte(`[{"id":"1","name":"alpha"},{"id":"2","name":"beta"}]`), nil
+		},
+	}, nil)
 
 	buf := new(bytes.Buffer)
 	listCmd.SetOut(buf)
 	listCmd.SetErr(new(bytes.Buffer))
 
-	err := listCmd.RunE(listCmd, nil)
-	if err != nil {
+	if err := listCmd.RunE(listCmd, nil); err != nil {
 		t.Fatalf("list command failed: %v", err)
 	}
 
@@ -98,32 +98,27 @@ func TestListCmd(t *testing.T) {
 }
 
 func TestPairCmd(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/pairs" || r.Method != http.MethodPost {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"id":"42","name":"test-pair"}`))
-	}))
-	defer srv.Close()
-
-	resetViper(srv.URL)
+	var gotName string
+	setSvc(&mockAPIClient{
+		createPairFn: func(name string) (int, []byte, error) {
+			gotName = name
+			return 201, []byte(`{"id":"42","name":"test-pair"}`), nil
+		},
+	}, nil)
 
 	buf := new(bytes.Buffer)
-	// Reset flags
 	pairCmd.ResetFlags()
 	pairCmd.Flags().String("name", "test-pair", "name for the pair session")
-
 	pairCmd.SetOut(buf)
 	pairCmd.SetErr(new(bytes.Buffer))
 
-	err := pairCmd.RunE(pairCmd, nil)
-	if err != nil {
+	if err := pairCmd.RunE(pairCmd, nil); err != nil {
 		t.Fatalf("pair command failed: %v", err)
 	}
 
+	if gotName != "test-pair" {
+		t.Errorf("expected name 'test-pair', got %q", gotName)
+	}
 	got := buf.String()
 	if !strings.Contains(got, "201") {
 		t.Errorf("expected HTTP 201 in output, got: %s", got)
@@ -133,79 +128,28 @@ func TestPairCmd(t *testing.T) {
 	}
 }
 
-func TestToWebSocketURL(t *testing.T) {
-	cases := []struct {
-		input string
-		want  string
-	}{
-		{"http://localhost:8080", "ws://localhost:8080"},
-		{"https://example.com", "wss://example.com"},
-		{"http://example.com/", "ws://example.com"},
-		{"ws://already-ws.com", "ws://already-ws.com"},
-	}
-	for _, tc := range cases {
-		got := toWebSocketURL(tc.input)
-		if got != tc.want {
-			t.Errorf("toWebSocketURL(%q) = %q, want %q", tc.input, got, tc.want)
-		}
-	}
-}
+func TestConnectCmd(t *testing.T) {
+	setSvc(nil, &mockWSClient{
+		dialFn: func(ctx context.Context, _ string, _ map[string]string, onMessage ports.MessageHandler) error {
+			// Simulate two text messages then server close
+			onMessage(1, []byte("hello"))
+			onMessage(1, []byte("world"))
+			return nil // server-side close
+		},
+	})
 
-func TestDoRequestWithToken(t *testing.T) {
-	var capturedAuth string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedAuth = r.Header.Get("Authorization")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{}`))
-	}))
-	defer srv.Close()
+	buf := new(bytes.Buffer)
+	connectCmd.ResetFlags()
+	connectCmd.Flags().String("path", "/ws", "WebSocket endpoint path")
+	connectCmd.SetOut(buf)
+	connectCmd.SetErr(new(bytes.Buffer))
 
-	resetViper(srv.URL)
-	viper.Set("token", "secret-token")
-
-	_, _, err := doRequest(http.MethodGet, "/api/status", nil)
-	if err != nil {
-		t.Fatalf("doRequest failed: %v", err)
+	if err := connectCmd.RunE(connectCmd, nil); err != nil {
+		t.Fatalf("connect command failed: %v", err)
 	}
 
-	if capturedAuth != "Bearer secret-token" {
-		t.Errorf("expected Authorization header 'Bearer secret-token', got: %s", capturedAuth)
+	got := buf.String()
+	if !strings.Contains(got, "hello") || !strings.Contains(got, "world") {
+		t.Errorf("expected messages in output, got: %s", got)
 	}
 }
-
-func TestConnectCmdWebSocket(t *testing.T) {
-	upgrader := &wsUpgrader{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.upgrade(w, r)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer conn.Close()
-		// Send one message then close
-		_ = conn.WriteMessage(1, []byte("hello from server"))
-		_ = conn.WriteMessage(8, []byte{3, 232}) // Close frame
-	}))
-	defer srv.Close()
-
-	// This just ensures that toWebSocketURL is called correctly; full WS
-	// integration is tested indirectly via the unit test above.
-	wsURL := toWebSocketURL(srv.URL)
-	if !strings.HasPrefix(wsURL, "ws://") {
-		t.Errorf("expected ws:// prefix, got: %s", wsURL)
-	}
-}
-
-// wsUpgrader is a minimal WebSocket upgrader for tests.
-type wsUpgrader struct{}
-
-func (u *wsUpgrader) upgrade(w http.ResponseWriter, r *http.Request) (*wsConn, error) {
-	// We only test URL conversion; skip actual upgrade in this file.
-	return nil, nil
-}
-
-type wsConn struct{}
-
-func (c *wsConn) Close() error                                  { return nil }
-func (c *wsConn) WriteMessage(t int, data []byte) error        { return nil }
-func (c *wsConn) ReadMessage() (int, []byte, error)            { return 0, nil, nil }
